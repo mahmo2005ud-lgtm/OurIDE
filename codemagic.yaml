@@ -2,21 +2,23 @@ workflows:
   ouride-debug:
     name: OurIDE Debug APK
     max_build_duration: 120
-    instance_type: mac_mini_m2
 
     environment:
       java: 17
 
     scripts:
-      - name: Check source
+      - name: Extract OurIDE source
         script: |
           set -e
-          test -f AndroidIDE-dev/gradlew
-          echo "OurIDE source found."
+          test -f OurIDE_GITHUB_SOURCE_ROOT.zip
+          rm -rf OurIDE
+          mkdir OurIDE
+          unzip -q OurIDE_GITHUB_SOURCE_ROOT.zip -d OurIDE
+          test -f OurIDE/gradlew
 
-      - name: Set Android SDK location
+      - name: Set Android SDK
         script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/AndroidIDE-dev/local.properties"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/OurIDE/local.properties"
 
       - name: Install Android SDK 36
         script: |
@@ -28,19 +30,18 @@ workflows:
 
       - name: Prepare Gradle
         script: |
-          set -e
-          cd "$CM_BUILD_DIR/AndroidIDE-dev"
+          cd "$CM_BUILD_DIR/OurIDE"
           chmod +x gradlew
           ./gradlew --version
 
-      - name: Build OurIDE Debug APK
+      - name: Build OurIDE
         script: |
           set -e
-          cd "$CM_BUILD_DIR/AndroidIDE-dev"
+          cd "$CM_BUILD_DIR/OurIDE"
           ./gradlew :core:app:assembleDebug \
             --stacktrace \
             --no-daemon
 
     artifacts:
-      - AndroidIDE-dev/core/app/build/outputs/apk/debug/*.apk
-      - AndroidIDE-dev/core/app/build/outputs/apk/debug/output-metadata.json
+      - OurIDE/core/app/build/outputs/apk/debug/*.apk
+      - OurIDE/core/app/build/outputs/apk/debug/output-metadata.json
