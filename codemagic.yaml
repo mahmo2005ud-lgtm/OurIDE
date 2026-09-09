@@ -28,6 +28,7 @@ workflows:
           test -f "$OURIDE_DIR/settings.gradle.kts"
 
           echo "OurIDE directory: $OURIDE_DIR"
+
           echo "OURIDE_DIR=$OURIDE_DIR" >> "$CM_ENV"
 
           chmod +x "$OURIDE_DIR/gradlew"
@@ -63,12 +64,12 @@ workflows:
         script: |
           set +e
 
-          echo "Checking system Gradle..."
+          echo "System Gradle:"
 
           if command -v gradle >/dev/null 2>&1; then
             gradle --version
           else
-            echo "No Gradle command in PATH."
+            echo "No system Gradle found."
           fi
 
           echo ""
@@ -80,13 +81,13 @@ workflows:
           set -e
 
           GRADLE_VERSION="9.6.0"
-          GRADLE_BASE="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
+
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
+
           GRADLE_SHA="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip.sha256"
 
-          mkdir -p "$GRADLE_BASE"
-
           GRADLE_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+
           SHA_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip.sha256"
 
           echo "Downloading Gradle $GRADLE_VERSION..."
@@ -105,6 +106,7 @@ workflows:
             -o "$GRADLE_ZIP"
 
           echo "Downloading official SHA-256..."
+
           curl -L \
             --fail \
             --retry 5 \
@@ -113,12 +115,26 @@ workflows:
             "$SHA_URL" \
             -o "$GRADLE_SHA"
 
-          echo "Checking SHA-256..."
-          cd "$CM_BUILD_DIR"
+          echo ""
+          echo "Gradle SHA-256 file:"
+          cat "$GRADLE_SHA"
 
-          shasum -a 256 -c "$GRADLE_SHA"
+          echo ""
+          echo "Calculating downloaded file SHA-256..."
 
-          echo "Gradle archive verified."
+          ACTUAL_SHA=$(shasum -a 256 "$GRADLE_ZIP" | awk '{print $1}')
+
+          EXPECTED_SHA=$(tr -d '[:space:]' < "$GRADLE_SHA")
+
+          echo "Expected: $EXPECTED_SHA"
+          echo "Actual:   $ACTUAL_SHA"
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: Gradle SHA-256 mismatch."
+            exit 1
+          fi
+
+          echo "Gradle archive verified successfully."
 
 
       - name: Install local Gradle
@@ -126,18 +142,23 @@ workflows:
           set -e
 
           GRADLE_VERSION="9.6.0"
+
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
+
           GRADLE_HOME="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
 
           if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
             echo "Extracting Gradle..."
+
             rm -rf "$GRADLE_HOME"
+
             unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR"
           fi
 
           test -x "$GRADLE_HOME/bin/gradle"
 
           echo "GRADLE_HOME=$GRADLE_HOME" >> "$CM_ENV"
+
           echo "$GRADLE_HOME/bin" >> "$CM_ENV_PATH"
 
           "$GRADLE_HOME/bin/gradle" --version
@@ -149,7 +170,7 @@ workflows:
 
           cd "$OURIDE_DIR"
 
-          echo "Using local Gradle:"
+          echo "Using Gradle:"
           "$GRADLE_HOME/bin/gradle" --version
 
 
