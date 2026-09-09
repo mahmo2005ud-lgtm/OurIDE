@@ -2,6 +2,7 @@ workflows:
   ouride-debug:
     name: OurIDE Debug APK
     max_build_duration: 120
+    instance_type: mac_mini_m2
 
     environment:
       java: 17
@@ -40,6 +41,8 @@ workflows:
           echo "sdk.dir=$ANDROID_SDK_ROOT" \
             > "$OURIDE_DIR/local.properties"
 
+          echo "Android SDK: $ANDROID_SDK_ROOT"
+
 
       - name: Install Android SDK 36
         script: |
@@ -47,18 +50,44 @@ workflows:
 
           SDKMANAGER="/usr/local/share/android-sdk/cmdline-tools/latest/bin/sdkmanager"
 
+          test -x "$SDKMANAGER"
+
           "$SDKMANAGER" --licenses || true
 
-          "$SDKMANAGER" "platforms;android-36" \
-                        "build-tools;36.0.0" \
-                        "platform-tools"
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
 
 
-      - name: Prepare Gradle
+      - name: Check installed Gradle
+        script: |
+          set +e
+
+          if command -v gradle >/dev/null 2>&1; then
+            echo "System Gradle found:"
+            gradle --version
+          else
+            echo "No system Gradle command found."
+          fi
+
+          if [ -x "/Users/builder/programs/gradle-8.14.1/bin/gradle" ]; then
+            echo "Codemagic preinstalled Gradle found:"
+            "/Users/builder/programs/gradle-8.14.1/bin/gradle" --version
+          fi
+
+          echo ""
+          echo "Required Gradle version for OurIDE: 9.6.0+"
+          echo "Required AGP version: 9.4.0"
+
+
+      - name: Check Gradle wrapper
         script: |
           set -e
 
           cd "$OURIDE_DIR"
+
+          echo "Checking Gradle wrapper..."
 
           ./gradlew --version
 
@@ -68,6 +97,8 @@ workflows:
           set -e
 
           cd "$OURIDE_DIR"
+
+          echo "Building OurIDE..."
 
           ./gradlew :core:app:assembleDebug \
             --stacktrace \
