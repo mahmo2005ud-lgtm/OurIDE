@@ -35,6 +35,7 @@ workflows:
       - name: Set Android SDK
         script: |
           set -e
+
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$OURIDE_DIR/local.properties"
 
       - name: Install Android SDK 36
@@ -42,9 +43,11 @@ workflows:
           set -e
 
           SDKMANAGER="/usr/local/share/android-sdk/cmdline-tools/latest/bin/sdkmanager"
+
           test -x "$SDKMANAGER"
 
           "$SDKMANAGER" --licenses || true
+
           "$SDKMANAGER" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
@@ -55,6 +58,7 @@ workflows:
           set -e
 
           GRADLE_VERSION="9.6.0"
+
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
           GRADLE_SHA="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip.sha256"
 
@@ -63,7 +67,8 @@ workflows:
 
           touch "$GRADLE_ZIP"
 
-          curl -L --fail \
+          curl -L \
+            --fail \
             --retry 5 \
             --retry-delay 3 \
             --retry-all-errors \
@@ -71,7 +76,8 @@ workflows:
             "$GRADLE_URL" \
             -o "$GRADLE_ZIP"
 
-          curl -L --fail \
+          curl -L \
+            --fail \
             --retry 5 \
             --retry-delay 3 \
             --retry-all-errors \
@@ -86,76 +92,130 @@ workflows:
 
           test "$ACTUAL_SHA" = "$EXPECTED_SHA"
 
+          echo "Gradle archive verified."
+
       - name: Install Gradle
         script: |
           set -e
 
           GRADLE_VERSION="9.6.0"
+
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
           GRADLE_HOME="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
 
           rm -rf "$GRADLE_HOME"
+
           unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR"
 
           test -x "$GRADLE_HOME/bin/gradle"
+
           "$GRADLE_HOME/bin/gradle" --version
 
-      - name: Remove missing projects
+      - name: Remove missing Gradle projects
         script: |
           set -e
 
           cd "$OURIDE_DIR"
 
-          cp settings.gradle.kts settings.gradle.kts.codemagic-backup
-
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          path = Path("settings.gradle.kts")
-          text = path.read_text()
+          ROOT = Path.cwd()
 
-          lines = text.splitlines(keepends=True)
-          in_include = False
-          changed = False
-          output = []
+          settings_files = list(ROOT.rglob("settings.gradle.kts"))
+          print(f"Found {len(settings_files)} settings.gradle.kts files")
 
-          project_pattern = re.compile(r'^\s*"(:[^"]+)"\s*,?\s*$')
+          # Matches project entries such as:
+          #   ":testing:gradleToolingTest",
+          #   ":desugaring-core",
+          project_token = re.compile(r'"(:[^"]+)"')
 
-          for line in lines:
-              stripped = line.strip()
+          changed_files = 0
 
-              if stripped.startswith("include("):
-                  in_include = True
+          for settings in settings_files:
+              base = settings.parent
+              text = settings.read_text()
+
+              original = text
+
+              def token_exists(project: str) -> bool:
+                  project_path = base.joinpath(*project.lstrip(":").split(":"))
+                  return project_path.is_dir()
+
+              # Remove only missing project entries from include(...) blocks.
+              lines = text.splitlines(keepends=True)
+              output = []
+              in_include = False
+
+              for line in lines:
+                  stripped = line.strip()
+
+                  if stripped.startswith("include("):
+                      in_include = True
+                      output.append(line)
+                      continue
+
+                  if in_include and stripped == ")":
+                      in_include = False
+                      output.append(line)
+                      continue
+
+                  if in_include:
+                      matches = list(project_token.finditer(line))
+
+                      if matches:
+                          removed_any = False
+                          new_line = line
+
+                          for m in reversed(matches):
+                              project = m.group(1)
+                              if not token_exists(project):
+                                  print(
+                                      f"Disabling missing project "
+                                      f"{project} in {settings.relative_to(ROOT)}"
+                                  )
+                                  start, end = m.span()
+                                  left = new_line[:start]
+                                  right = new_line[end:]
+
+                                  # Also remove a following comma when possible.
+                                  right = re.sub(r'^\s*,', '', right, count=1)
+
+                                  new_line = left + right
+                                  removed_any = True
+
+                          if removed_any:
+                              changed_files += 1
+                              line = new_line
+
                   output.append(line)
-                  continue
 
-              if in_include and stripped == ")":
-                  in_include = False
-                  output.append(line)
-                  continue
+              new_text = "".join(output)
 
-              if in_include:
-                  m = project_pattern.match(line)
-                  if m:
-                      project = m.group(1)
-                      project_dir = Path(project.lstrip(":").replace(":", "/"))
+              if new_text != original:
+                  backup = settings.with_suffix(settings.suffix + ".codemagic-backup")
+                  if not backup.exists():
+                      backup.write_text(original)
+                  settings.write_text(new_text)
 
-                      if not project_dir.is_dir():
-                          print(f"Disabling missing project: {project} -> {project_dir}")
-                          changed = True
-                          continue
+          print(f"Modified settings entries: {changed_files}")
 
-              output.append(line)
-
-          if changed:
-              path.write_text("".join(output))
-          else:
-              print("No missing included projects found.")
+          # Show every remaining project include after cleanup.
+          print("\nRemaining included projects:")
+          for settings in settings_files:
+              print(f"\n--- {settings.relative_to(ROOT)} ---")
+              text = settings.read_text()
+              inside = False
+              for line in text.splitlines():
+                  s = line.strip()
+                  if s.startswith("include("):
+                      inside = True
+                  if inside:
+                      print(line)
+                  if inside and s == ")":
+                      inside = False
           PY
-
-          echo "Included projects after cleanup:"
-          sed -n '/^include(/,/^)/p' settings.gradle.kts
 
       - name: Verify Gradle project
         script: |
@@ -165,7 +225,12 @@ workflows:
 
           GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
 
+          echo "Gradle version:"
           "$GRADLE" --version
+
+          echo ""
+          echo "Checking Gradle projects..."
+
           "$GRADLE" projects --no-daemon
 
       - name: Build OurIDE
@@ -175,6 +240,8 @@ workflows:
           cd "$OURIDE_DIR"
 
           GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
+
+          echo "Building OurIDE..."
 
           "$GRADLE" \
             :core:app:assembleDebug \
