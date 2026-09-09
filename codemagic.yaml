@@ -7,11 +7,13 @@ workflows:
       java: 17
 
     scripts:
-            - name: Extract OurIDE source
+
+      - name: Extract OurIDE source
         script: |
           set -e
 
           ZIP="$CM_BUILD_DIR/OurIDE_GITHUB_SOURCE_ROOT.zip"
+
           test -f "$ZIP"
 
           rm -rf "$CM_BUILD_DIR/ouride_src"
@@ -25,14 +27,19 @@ workflows:
           test -f "$OURIDE_DIR/settings.gradle.kts"
 
           echo "OurIDE directory: $OURIDE_DIR"
+
           echo "OURIDE_DIR=$OURIDE_DIR" >> "$CM_ENV"
 
           chmod +x "$OURIDE_DIR/gradlew"
 
+
       - name: Set Android SDK
         script: |
           set -e
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$OURIDE_DIR/local.properties"
+
+          echo "sdk.dir=$ANDROID_SDK_ROOT" \
+            > "$OURIDE_DIR/local.properties"
+
 
       - name: Install Android SDK 36
         script: |
@@ -46,21 +53,27 @@ workflows:
                         "build-tools;36.0.0" \
                         "platform-tools"
 
+
       - name: Prepare Gradle
         script: |
           set -e
+
           cd "$OURIDE_DIR"
+
           ./gradlew --version
+
 
       - name: Build OurIDE
         script: |
           set -e
+
           cd "$OURIDE_DIR"
 
           ./gradlew :core:app:assembleDebug \
             --stacktrace \
             --no-daemon
 
+
     artifacts:
-      - "**/core/app/build/outputs/apk/debug/*.apk"
-      - "**/core/app/build/outputs/apk/debug/output-metadata.json"
+      - "ouride_src/core/app/build/outputs/apk/debug/*.apk"
+      - "ouride_src/core/app/build/outputs/apk/debug/output-metadata.json"
