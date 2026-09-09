@@ -7,7 +7,7 @@ workflows:
       java: 17
 
     scripts:
-      - name: Extract OurIDE source
+            - name: Extract OurIDE source
         script: |
           set -e
 
@@ -19,19 +19,15 @@ workflows:
 
           unzip -q "$ZIP" -d "$CM_BUILD_DIR/ouride_src"
 
-          GRADLEW=$(find "$CM_BUILD_DIR/ouride_src" -type f -name gradlew -print -quit)
+          OURIDE_DIR="$CM_BUILD_DIR/ouride_src"
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found."
-            find "$CM_BUILD_DIR/ouride_src" -maxdepth 3 -type f | head -100
-            exit 1
-          fi
-
-          OURIDE_DIR=$(dirname "$GRADLEW")
+          test -f "$OURIDE_DIR/gradlew"
+          test -f "$OURIDE_DIR/settings.gradle.kts"
 
           echo "OurIDE directory: $OURIDE_DIR"
           echo "OURIDE_DIR=$OURIDE_DIR" >> "$CM_ENV"
-          chmod +x "$GRADLEW"
+
+          chmod +x "$OURIDE_DIR/gradlew"
 
       - name: Set Android SDK
         script: |
