@@ -121,29 +121,83 @@ workflows:
 
           test -x "$GRADLE_HOME/bin/gradle"
 
-          echo "Testing Gradle..."
-
           "$GRADLE_HOME/bin/gradle" --version
 
 
-      - name: Prepare Gradle
+      - name: Remove missing test project
         script: |
           set -e
 
+          cd "$OURIDE_DIR"
+
+          TEST_DIR="testing/gradleToolingTest"
+
+          if [ ! -d "$TEST_DIR" ]; then
+            echo "Missing test project detected: $TEST_DIR"
+            echo "Removing its references from settings.gradle.kts..."
+
+            cp settings.gradle.kts settings.gradle.kts.codemagic-backup
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("settings.gradle.kts")
+          text = path.read_text()
+
+          lines = text.splitlines(keepends=True)
+
+          filtered = [
+              line
+              for line in lines
+              if "gradleToolingTest" not in line
+          ]
+
+          new_text = "".join(filtered)
+
+          if new_text == text:
+              print("No gradleToolingTest reference found.")
+          else:
+              path.write_text(new_text)
+              print("Removed gradleToolingTest references.")
+          PY
+
+            echo "Checking remaining references..."
+
+            if grep -n "gradleToolingTest" settings.gradle.kts; then
+              echo "ERROR: gradleToolingTest reference still exists."
+              exit 1
+            fi
+
+            echo "Missing test project disabled for this CI build."
+          else
+            echo "Test project exists. No change required."
+          fi
+
+
+      - name: Verify Gradle project
+        script: |
+          set -e
+
+          cd "$OURIDE_DIR"
+
           GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
 
-          test -x "$GRADLE"
-
+          echo "Gradle version:"
           "$GRADLE" --version
+
+          echo ""
+          echo "Checking Gradle projects..."
+
+          "$GRADLE" projects --no-daemon
 
 
       - name: Build OurIDE
         script: |
           set -e
 
-          GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
+          cd "$OURIDE_DIR"
 
-          cd "$CM_BUILD_DIR/ouride_src"
+          GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
 
           echo "Building OurIDE..."
 
