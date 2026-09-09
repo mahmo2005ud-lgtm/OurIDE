@@ -39,9 +39,7 @@ workflows:
           set -e
 
           echo "sdk.dir=$ANDROID_SDK_ROOT" \
-            > "$OURIDE_DIR/local.properties"
-
-          echo "Android SDK: $ANDROID_SDK_ROOT"
+            > "$CM_BUILD_DIR/ouride_src/local.properties"
 
 
       - name: Install Android SDK 36
@@ -60,41 +58,21 @@ workflows:
             "platform-tools"
 
 
-      - name: Check available Gradle
-        script: |
-          set +e
-
-          echo "System Gradle:"
-
-          if command -v gradle >/dev/null 2>&1; then
-            gradle --version
-          else
-            echo "No system Gradle found."
-          fi
-
-          echo ""
-          echo "Required Gradle: 9.6.0+"
-
-
-      - name: Download Gradle 9.6.0 with resume
+      - name: Download Gradle 9.6.0
         script: |
           set -e
 
           GRADLE_VERSION="9.6.0"
 
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
-
           GRADLE_SHA="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip.sha256"
 
           GRADLE_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
-
           SHA_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip.sha256"
 
           echo "Downloading Gradle $GRADLE_VERSION..."
 
-          if [ ! -f "$GRADLE_ZIP" ]; then
-            touch "$GRADLE_ZIP"
-          fi
+          touch "$GRADLE_ZIP"
 
           curl -L \
             --fail \
@@ -105,7 +83,7 @@ workflows:
             "$GRADLE_URL" \
             -o "$GRADLE_ZIP"
 
-          echo "Downloading official SHA-256..."
+          echo "Downloading SHA-256..."
 
           curl -L \
             --fail \
@@ -115,51 +93,35 @@ workflows:
             "$SHA_URL" \
             -o "$GRADLE_SHA"
 
-          echo ""
-          echo "Gradle SHA-256 file:"
-          cat "$GRADLE_SHA"
-
-          echo ""
-          echo "Calculating downloaded file SHA-256..."
-
+          EXPECTED_SHA=$(tr -d '[:space:]' < "$GRADLE_SHA")
           ACTUAL_SHA=$(shasum -a 256 "$GRADLE_ZIP" | awk '{print $1}')
 
-          EXPECTED_SHA=$(tr -d '[:space:]' < "$GRADLE_SHA")
+          echo "Expected SHA: $EXPECTED_SHA"
+          echo "Actual SHA:   $ACTUAL_SHA"
 
-          echo "Expected: $EXPECTED_SHA"
-          echo "Actual:   $ACTUAL_SHA"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
 
-          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo "ERROR: Gradle SHA-256 mismatch."
-            exit 1
-          fi
-
-          echo "Gradle archive verified successfully."
+          echo "Gradle archive verified."
 
 
-      - name: Install local Gradle
+      - name: Install Gradle
         script: |
           set -e
 
           GRADLE_VERSION="9.6.0"
 
           GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
-
           GRADLE_HOME="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
 
-          if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
-            echo "Extracting Gradle..."
+          rm -rf "$GRADLE_HOME"
 
-            rm -rf "$GRADLE_HOME"
+          echo "Extracting Gradle..."
 
-            unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR"
-          fi
+          unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR"
 
           test -x "$GRADLE_HOME/bin/gradle"
 
-          echo "GRADLE_HOME=$GRADLE_HOME" >> "$CM_ENV"
-
-          echo "$GRADLE_HOME/bin" >> "$CM_ENV_PATH"
+          echo "Testing Gradle..."
 
           "$GRADLE_HOME/bin/gradle" --version
 
@@ -168,21 +130,24 @@ workflows:
         script: |
           set -e
 
-          cd "$OURIDE_DIR"
+          GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
 
-          echo "Using Gradle:"
-          "$GRADLE_HOME/bin/gradle" --version
+          test -x "$GRADLE"
+
+          "$GRADLE" --version
 
 
       - name: Build OurIDE
         script: |
           set -e
 
-          cd "$OURIDE_DIR"
+          GRADLE="$CM_BUILD_DIR/gradle-9.6.0/bin/gradle"
 
-          echo "Starting OurIDE build..."
+          cd "$CM_BUILD_DIR/ouride_src"
 
-          "$GRADLE_HOME/bin/gradle" \
+          echo "Building OurIDE..."
+
+          "$GRADLE" \
             :core:app:assembleDebug \
             --stacktrace \
             --no-daemon
