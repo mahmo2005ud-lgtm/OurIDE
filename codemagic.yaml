@@ -28,7 +28,6 @@ workflows:
           test -f "$OURIDE_DIR/settings.gradle.kts"
 
           echo "OurIDE directory: $OURIDE_DIR"
-
           echo "OURIDE_DIR=$OURIDE_DIR" >> "$CM_ENV"
 
           chmod +x "$OURIDE_DIR/gradlew"
@@ -60,36 +59,98 @@ workflows:
             "platform-tools"
 
 
-      - name: Check installed Gradle
+      - name: Check available Gradle
         script: |
           set +e
 
+          echo "Checking system Gradle..."
+
           if command -v gradle >/dev/null 2>&1; then
-            echo "System Gradle found:"
             gradle --version
           else
-            echo "No system Gradle command found."
-          fi
-
-          if [ -x "/Users/builder/programs/gradle-8.14.1/bin/gradle" ]; then
-            echo "Codemagic preinstalled Gradle found:"
-            "/Users/builder/programs/gradle-8.14.1/bin/gradle" --version
+            echo "No Gradle command in PATH."
           fi
 
           echo ""
-          echo "Required Gradle version for OurIDE: 9.6.0+"
-          echo "Required AGP version: 9.4.0"
+          echo "Required Gradle: 9.6.0+"
 
 
-      - name: Check Gradle wrapper
+      - name: Download Gradle 9.6.0 with resume
+        script: |
+          set -e
+
+          GRADLE_VERSION="9.6.0"
+          GRADLE_BASE="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
+          GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
+          GRADLE_SHA="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip.sha256"
+
+          mkdir -p "$GRADLE_BASE"
+
+          GRADLE_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+          SHA_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip.sha256"
+
+          echo "Downloading Gradle $GRADLE_VERSION..."
+
+          if [ ! -f "$GRADLE_ZIP" ]; then
+            touch "$GRADLE_ZIP"
+          fi
+
+          curl -L \
+            --fail \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            -C - \
+            "$GRADLE_URL" \
+            -o "$GRADLE_ZIP"
+
+          echo "Downloading official SHA-256..."
+          curl -L \
+            --fail \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            "$SHA_URL" \
+            -o "$GRADLE_SHA"
+
+          echo "Checking SHA-256..."
+          cd "$CM_BUILD_DIR"
+
+          shasum -a 256 -c "$GRADLE_SHA"
+
+          echo "Gradle archive verified."
+
+
+      - name: Install local Gradle
+        script: |
+          set -e
+
+          GRADLE_VERSION="9.6.0"
+          GRADLE_ZIP="$CM_BUILD_DIR/gradle-$GRADLE_VERSION-bin.zip"
+          GRADLE_HOME="$CM_BUILD_DIR/gradle-$GRADLE_VERSION"
+
+          if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
+            echo "Extracting Gradle..."
+            rm -rf "$GRADLE_HOME"
+            unzip -q "$GRADLE_ZIP" -d "$CM_BUILD_DIR"
+          fi
+
+          test -x "$GRADLE_HOME/bin/gradle"
+
+          echo "GRADLE_HOME=$GRADLE_HOME" >> "$CM_ENV"
+          echo "$GRADLE_HOME/bin" >> "$CM_ENV_PATH"
+
+          "$GRADLE_HOME/bin/gradle" --version
+
+
+      - name: Prepare Gradle
         script: |
           set -e
 
           cd "$OURIDE_DIR"
 
-          echo "Checking Gradle wrapper..."
-
-          ./gradlew --version
+          echo "Using local Gradle:"
+          "$GRADLE_HOME/bin/gradle" --version
 
 
       - name: Build OurIDE
@@ -98,9 +159,10 @@ workflows:
 
           cd "$OURIDE_DIR"
 
-          echo "Building OurIDE..."
+          echo "Starting OurIDE build..."
 
-          ./gradlew :core:app:assembleDebug \
+          "$GRADLE_HOME/bin/gradle" \
+            :core:app:assembleDebug \
             --stacktrace \
             --no-daemon
 
