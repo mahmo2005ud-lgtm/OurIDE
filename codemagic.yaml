@@ -2,12 +2,22 @@ workflows:
   ouride-debug:
     name: OurIDE Debug APK
     max_build_duration: 120
-    instance_type: mac_mini_m2
+    instance_type: linux_x2
 
     environment:
       java: 17
 
     scripts:
+      - name: Restore OurIDE source archive
+        script: |
+          set -e
+          cd "$CM_BUILD_DIR"
+          test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00"
+          test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01"
+          cat "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00" "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01" > OurIDE_SOURCE_CLEAN_1.0.1.zip
+          unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip
+          rm -f OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
+
       - name: Configure Android SDK
         script: |
           set -e
