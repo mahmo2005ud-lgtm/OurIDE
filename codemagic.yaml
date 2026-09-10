@@ -46,24 +46,25 @@ workflows:
           import re
 
           changed = []
-          leftovers = []
+          failures = []
 
-          def find_matching_brace(s, open_pos):
+          def find_matching_brace(text, open_pos):
               depth = 0
               quote = None
               triple = False
               escape = False
               i = open_pos
-              while i < len(s):
+              while i < len(text):
                   if triple:
-                      if s.startswith('"""', i):
+                      if text.startswith('"""', i):
                           triple = False
                           i += 3
-                          continue
-                      i += 1
+                      else:
+                          i += 1
                       continue
-                  c = s[i]
-                  if quote:
+
+                  c = text[i]
+                  if quote is not None:
                       if escape:
                           escape = False
                       elif c == '\\':
@@ -72,7 +73,8 @@ workflows:
                           quote = None
                       i += 1
                       continue
-                  if s.startswith('"""', i):
+
+                  if text.startswith('"""', i):
                       triple = True
                       i += 3
                       continue
@@ -85,7 +87,14 @@ workflows:
                       if depth == 0:
                           return i
                   i += 1
+
               raise ValueError('Unclosed Kotlin block')
+
+          # Match kotlinOptions regardless of indentation, spacing, nesting,
+          # receiver, or whether the block is one-line or multi-line.
+          block_pattern = re.compile(r"(?P<prefix>\\bkotlinOptions\\s*\\{)")
+          jvm_set_pattern = re.compile(r"(?m)^[ \\t]*jvmTarget\\s*=\\s*([\"'])(?:17|1\\.8)(?:[\"'])\\s*$")
+          jvm_set_call_pattern = re.compile(r"(?m)^[ \\t]*jvmTarget\\s*\\.\\s*set\\s*\\(\\s*([\"'])(?:17|1\\.8)\\1\\s*\\)\\s*$")
 
           def migrate_file(path):
               text = path.read_text()
@@ -93,69 +102,77 @@ workflows:
               pos = 0
               replacements = []
 
-              # Find every kotlinOptions block regardless of formatting, nesting,
-              # receiver (android/task/target), or line layout.
-              pattern = re.compile(r'(?m)(?P<indent>^[ \\t]*)?(?P<name>kotlinOptions)\\s*\\{')
               while True:
-                  m = pattern.search(text, pos)
-                  if not m:
+                  match = block_pattern.search(text, pos)
+                  if not match:
                       break
-                  open_pos = text.find('{', m.start(), m.end())
+
+                  open_pos = text.find('{', match.start(), match.end())
                   close_pos = find_matching_brace(text, open_pos)
                   body = text[open_pos + 1:close_pos]
 
-                  # Support the common Kotlin 1.x/2.x spellings of jvmTarget.
-                  body2 = re.sub(r'\\bjvmTarget\\s*=\\s*["\\']17["\\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', body)
-                  body2 = re.sub(r'\\bjvmTarget\\s*\\.\\s*set\\s*\\(\\s*["\\']17["\\']\\s*\\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', body2)
+                  body_clean = re.sub(r"(?m)//.*$", "", body)
+                  body_clean = re.sub(r"/\\*.*?\\*/", "", body_clean, flags=re.S).strip()
 
-                  # If the block contains only jvmTarget (plus whitespace/comments),
-                  # replace the whole deprecated block with compilerOptions.
-                  without_comments = re.sub(r'(?m)//.*$', '', body2)
-                  without_comments = re.sub(r'/\\*.*?\\*/', '', without_comments, flags=re.S)
-                  if re.fullmatch(r'\\s*(?:jvmTarget\\s*=\\s*org\\.jetbrains\\.kotlin\\.gradle\\.dsl\\.JvmTarget\\.JVM_17\\s*)?', without_comments):
-                      replacement = '{\\n' + body2 + '\\n' + (m.group('indent') or '') + '}'
-                      # Replace the block name only; preserve indentation and surrounding structure.
-                      replacement = 'compilerOptions ' + replacement
-                      replacements.append((m.start(), close_pos + 1, replacement))
+                  jvm_value = None
+                  if jvm_set_pattern.search(body):
+                      jvm_value = 'JVM_17' if re.search(r'jvmTarget\\s*=\\s*[\"\']17[\"\']', body) else 'JVM_1_8'
+                  elif jvm_set_call_pattern.search(body):
+                      jvm_value = 'JVM_17' if re.search(r'jvmTarget\\s*\\.\\s*set\\s*\\(\\s*[\"\']17[\"\']', body) else 'JVM_1_8'
+
+                  # This project only needs the jvmTarget migration. Preserve safety:
+                  # refuse to rewrite a block that contains unrelated kotlinOptions keys.
+                  normalized = re.sub(r"(?m)^[ \\t]*jvmTarget\\s*=.*$", "", body_clean)
+                  normalized = re.sub(r"(?m)^[ \\t]*jvmTarget\\s*\\.\\s*set\\s*\\(.*\\)\\s*$", "", normalized)
+                  normalized = normalized.strip()
+
+                  if jvm_value is None:
+                      failures.append(f'{path}: kotlinOptions has no supported jvmTarget value')
+                  elif normalized:
+                      failures.append(f'{path}: kotlinOptions contains unsupported settings: {normalized[:160]}')
                   else:
-                      # Other kotlinOptions properties need manual mapping; do not silently corrupt them.
-                      leftovers.append(f'{path}: kotlinOptions contains options beyond jvmTarget')
+                      indent_match = re.search(r'(?m)^([ \\t]*)\\bkotlinOptions\\s*\\{', text[:match.start() + 1])
+                      indent = indent_match.group(1) if indent_match else ''
+                      replacement = 'compilerOptions { jvmTarget = JvmTarget.' + jvm_value + ' }'
+                      replacements.append((match.start(), close_pos + 1, replacement))
+
                   pos = close_pos + 1
 
               for start, end, replacement in reversed(replacements):
                   text = text[:start] + replacement + text[end:]
 
               if text != original:
+                  if 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget' not in text:
+                      text = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + text
                   path.write_text(text)
                   changed.append(str(path))
 
-          for p in Path('.').rglob('build.gradle.kts'):
-              migrate_file(p)
+          for path in Path('.').rglob('build.gradle.kts'):
+              migrate_file(path)
 
-          if leftovers:
-              print('Unmigrated kotlinOptions blocks:')
-              for item in leftovers:
+          if failures:
+              print('Kotlin compiler option migration errors:')
+              for item in failures:
                   print(f'  {item}')
               raise SystemExit(1)
 
-          target = Path('composite-builds/build-logic/common/build.gradle.kts')
           remaining = []
-          for p in Path('.').rglob('build.gradle.kts'):
-              if 'kotlinOptions' in p.read_text():
-                  remaining.append(str(p))
+          for path in Path('.').rglob('build.gradle.kts'):
+              if re.search(r'\\bkotlinOptions\\s*\\{', path.read_text()):
+                  remaining.append(str(path))
 
           if remaining:
               print('Deprecated kotlinOptions remains in:')
-              for p in remaining:
-                  print(f'  {p}')
+              for path in remaining:
+                  print(f'  {path}')
               raise SystemExit(1)
 
           if not changed:
               raise SystemExit('No Kotlin compiler option migration was applied')
 
           print('Modernized Kotlin compiler options in:')
-          for p in changed:
-              print(f'  {p}')
+          for path in changed:
+              print(f'  {path}')
           PY
 
       - name: Prepare Codemagic-compatible Gradle build
@@ -163,8 +180,6 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR"
 
-          # Codemagic macOS M2 images provide Gradle 8.14.1 preinstalled.
-          # AGP 9.4 requires Gradle 9.6, so CI uses AGP 8.13.2 here.
           python3 - <<'PY'
           from pathlib import Path
 
