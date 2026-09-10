@@ -46,27 +46,109 @@ workflows:
           import re
 
           changed = []
-          for p in Path('.').rglob('build.gradle.kts'):
-              text = p.read_text()
-              original = text
+          leftovers = []
 
-              # Migrate deprecated Kotlin 2.x kotlinOptions.jvmTarget configuration
-              # to the typed compilerOptions/JvmTarget API used by the project.
-              text = re.sub(
-                  r'kotlinOptions\s*\{\s*jvmTarget\s*=\s*["\']17["\']\s*\}',
-                  'compilerOptions { jvmTarget = JvmTarget.JVM_17 }',
-                  text,
-              )
+          def find_matching_brace(s, open_pos):
+              depth = 0
+              quote = None
+              triple = False
+              escape = False
+              i = open_pos
+              while i < len(s):
+                  if triple:
+                      if s.startswith('"""', i):
+                          triple = False
+                          i += 3
+                          continue
+                      i += 1
+                      continue
+                  c = s[i]
+                  if quote:
+                      if escape:
+                          escape = False
+                      elif c == '\\':
+                          escape = True
+                      elif c == quote:
+                          quote = None
+                      i += 1
+                      continue
+                  if s.startswith('"""', i):
+                      triple = True
+                      i += 3
+                      continue
+                  if c in ('"', "'"):
+                      quote = c
+                  elif c == '{':
+                      depth += 1
+                  elif c == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return i
+                  i += 1
+              raise ValueError('Unclosed Kotlin block')
+
+          def migrate_file(path):
+              text = path.read_text()
+              original = text
+              pos = 0
+              replacements = []
+
+              # Find every kotlinOptions block regardless of formatting, nesting,
+              # receiver (android/task/target), or line layout.
+              pattern = re.compile(r'(?m)(?P<indent>^[ \\t]*)?(?P<name>kotlinOptions)\\s*\\{')
+              while True:
+                  m = pattern.search(text, pos)
+                  if not m:
+                      break
+                  open_pos = text.find('{', m.start(), m.end())
+                  close_pos = find_matching_brace(text, open_pos)
+                  body = text[open_pos + 1:close_pos]
+
+                  # Support the common Kotlin 1.x/2.x spellings of jvmTarget.
+                  body2 = re.sub(r'\\bjvmTarget\\s*=\\s*["\\']17["\\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', body)
+                  body2 = re.sub(r'\\bjvmTarget\\s*\\.\\s*set\\s*\\(\\s*["\\']17["\\']\\s*\\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', body2)
+
+                  # If the block contains only jvmTarget (plus whitespace/comments),
+                  # replace the whole deprecated block with compilerOptions.
+                  without_comments = re.sub(r'(?m)//.*$', '', body2)
+                  without_comments = re.sub(r'/\\*.*?\\*/', '', without_comments, flags=re.S)
+                  if re.fullmatch(r'\\s*(?:jvmTarget\\s*=\\s*org\\.jetbrains\\.kotlin\\.gradle\\.dsl\\.JvmTarget\\.JVM_17\\s*)?', without_comments):
+                      replacement = '{\\n' + body2 + '\\n' + (m.group('indent') or '') + '}'
+                      # Replace the block name only; preserve indentation and surrounding structure.
+                      replacement = 'compilerOptions ' + replacement
+                      replacements.append((m.start(), close_pos + 1, replacement))
+                  else:
+                      # Other kotlinOptions properties need manual mapping; do not silently corrupt them.
+                      leftovers.append(f'{path}: kotlinOptions contains options beyond jvmTarget')
+                  pos = close_pos + 1
+
+              for start, end, replacement in reversed(replacements):
+                  text = text[:start] + replacement + text[end:]
 
               if text != original:
-                  if 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget' not in text:
-                      text = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + text
-                  p.write_text(text)
-                  changed.append(str(p))
+                  path.write_text(text)
+                  changed.append(str(path))
+
+          for p in Path('.').rglob('build.gradle.kts'):
+              migrate_file(p)
+
+          if leftovers:
+              print('Unmigrated kotlinOptions blocks:')
+              for item in leftovers:
+                  print(f'  {item}')
+              raise SystemExit(1)
 
           target = Path('composite-builds/build-logic/common/build.gradle.kts')
-          if target.exists() and 'kotlinOptions' in target.read_text():
-              raise SystemExit(f'Deprecated kotlinOptions remains in {target}')
+          remaining = []
+          for p in Path('.').rglob('build.gradle.kts'):
+              if 'kotlinOptions' in p.read_text():
+                  remaining.append(str(p))
+
+          if remaining:
+              print('Deprecated kotlinOptions remains in:')
+              for p in remaining:
+                  print(f'  {p}')
+              raise SystemExit(1)
 
           if not changed:
               raise SystemExit('No Kotlin compiler option migration was applied')
