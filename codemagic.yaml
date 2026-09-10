@@ -18,8 +18,9 @@ workflows:
           rm -rf restored_ouride
           mkdir restored_ouride
           unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip -d restored_ouride
-          PROJECT_ROOT=$(find restored_ouride -type f -name gradlew -print -quit | xargs -r dirname)
-          test -n "$PROJECT_ROOT"
+          PROJECT_ROOT="$CM_BUILD_DIR/restored_ouride/AndroidIDE-dev"
+          test -f "$PROJECT_ROOT/gradlew"
+          test -f "$PROJECT_ROOT/settings.gradle.kts"
           cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
           rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
 
