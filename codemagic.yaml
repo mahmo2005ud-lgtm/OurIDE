@@ -15,8 +15,13 @@ workflows:
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00"
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01"
           cat "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00" "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01" > OurIDE_SOURCE_CLEAN_1.0.1.zip
-          unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip
-          rm -f OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
+          rm -rf restored_ouride
+          mkdir restored_ouride
+          unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip -d restored_ouride
+          PROJECT_ROOT=$(find restored_ouride -type f -name gradlew -print -quit | xargs -r dirname)
+          test -n "$PROJECT_ROOT"
+          cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
+          rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
 
       - name: Configure Android SDK
         script: |
