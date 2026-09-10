@@ -37,6 +37,45 @@ workflows:
           set -euo pipefail
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
 
+      - name: Modernize Kotlin compiler options
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          changed = []
+          for p in Path('.').rglob('build.gradle.kts'):
+              text = p.read_text()
+              original = text
+
+              # Migrate deprecated Kotlin 2.x kotlinOptions.jvmTarget configuration
+              # to the typed compilerOptions/JvmTarget API used by the project.
+              text = re.sub(
+                  r'kotlinOptions\s*\{\s*jvmTarget\s*=\s*["\']17["\']\s*\}',
+                  'compilerOptions { jvmTarget = JvmTarget.JVM_17 }',
+                  text,
+              )
+
+              if text != original:
+                  if 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget' not in text:
+                      text = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + text
+                  p.write_text(text)
+                  changed.append(str(p))
+
+          target = Path('composite-builds/build-logic/common/build.gradle.kts')
+          if target.exists() and 'kotlinOptions' in target.read_text():
+              raise SystemExit(f'Deprecated kotlinOptions remains in {target}')
+
+          if not changed:
+              raise SystemExit('No Kotlin compiler option migration was applied')
+
+          print('Modernized Kotlin compiler options in:')
+          for p in changed:
+              print(f'  {p}')
+          PY
+
       - name: Prepare Codemagic-compatible Gradle build
         script: |
           set -euo pipefail
