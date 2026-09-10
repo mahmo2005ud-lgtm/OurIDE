@@ -10,7 +10,7 @@ workflows:
     scripts:
       - name: Restore OurIDE source archive
         script: |
-          set -e
+          set -euo pipefail
           cd "$CM_BUILD_DIR"
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00"
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01"
@@ -18,29 +18,60 @@ workflows:
           rm -rf restored_ouride
           mkdir restored_ouride
           unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip -d restored_ouride
-          PROJECT_ROOT="$CM_BUILD_DIR/restored_ouride/AndroidIDE-dev"
-          test -f "$PROJECT_ROOT/gradlew"
-          test -f "$PROJECT_ROOT/settings.gradle.kts"
+
+          PROJECT_ROOT=""
+          while IFS= read -r settings_file; do
+            candidate="$(dirname "$settings_file")"
+            if [ -f "$candidate/gradlew" ] && [ -d "$candidate/core/app" ]; then
+              PROJECT_ROOT="$candidate"
+              break
+            fi
+          done < <(find restored_ouride -type f -name settings.gradle.kts -print)
+
+          test -n "$PROJECT_ROOT"
           cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
           rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
 
       - name: Configure Android SDK
         script: |
-          set -e
+          set -euo pipefail
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+
+      - name: Prepare Codemagic-compatible Gradle build
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+
+          # Codemagic macOS M2 images provide Gradle 8.14.1 preinstalled.
+          # AGP 9.4 requires Gradle 9.6, so CI uses AGP 8.13.2 here.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("gradle/libs.versions.toml")
+          text = p.read_text()
+          text = text.replace('agp = "9.4.0"', 'agp = "8.13.2"')
+          text = text.replace('agp-tooling = "9.4.0"', 'agp-tooling = "8.13.2"')
+          text = text.replace('ksp = "1.9.24-1.0.20"', 'ksp = "2.3.12"')
+          p.write_text(text)
+          PY
 
       - name: Verify project root
         script: |
-          set -e
-          test -f "$CM_BUILD_DIR/gradlew"
-          test -f "$CM_BUILD_DIR/settings.gradle.kts"
-          chmod +x "$CM_BUILD_DIR/gradlew"
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          test -f gradlew
+          test -f settings.gradle.kts
+          test -d core/app
+          chmod +x gradlew
 
       - name: Build OurIDE
         script: |
-          set -e
+          set -euo pipefail
           cd "$CM_BUILD_DIR"
-          ./gradlew :core:app:assembleDebug --stacktrace --no-daemon
+          GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
+          test -x "$GRADLE_BIN"
+          "$GRADLE_BIN" --version
+          "$GRADLE_BIN" :core:app:assembleDebug --stacktrace --no-daemon
 
     artifacts:
       - "core/app/build/outputs/apk/debug/*.apk"
