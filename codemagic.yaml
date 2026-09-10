@@ -43,7 +43,6 @@ workflows:
           cd "$CM_BUILD_DIR"
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           changed = []
           failures = []
@@ -87,14 +86,39 @@ workflows:
                       if depth == 0:
                           return i
                   i += 1
-
               raise ValueError('Unclosed Kotlin block')
 
-          # Match kotlinOptions regardless of indentation, spacing, nesting,
-          # receiver, or whether the block is one-line or multi-line.
-          block_pattern = re.compile(r"(?P<prefix>\\bkotlinOptions\\s*\\{)")
-          jvm_set_pattern = re.compile(r"(?m)^[ \\t]*jvmTarget\\s*=\\s*([\"'])(?:17|1\\.8)(?:[\"'])\\s*$")
-          jvm_set_call_pattern = re.compile(r"(?m)^[ \\t]*jvmTarget\\s*\\.\\s*set\\s*\\(\\s*([\"'])(?:17|1\\.8)\\1\\s*\\)\\s*$")
+          def strip_comments(text):
+              lines = []
+              in_block = False
+              for line in text.splitlines():
+                  out = ''
+                  i = 0
+                  while i < len(line):
+                      if in_block:
+                          end = line.find('*/', i)
+                          if end == -1:
+                              i = len(line)
+                          else:
+                              in_block = False
+                              i = end + 2
+                      else:
+                          block = line.find('/*', i)
+                          slash = line.find('//', i)
+                          if slash != -1 and (block == -1 or slash < block):
+                              out += line[i:slash]
+                              break
+                          if block == -1:
+                              out += line[i:]
+                              break
+                          out += line[i:block]
+                          in_block = True
+                          i = block + 2
+                  lines.append(out)
+              return '\n'.join(lines)
+
+          def normalize(value):
+              return ''.join(value.split())
 
           def migrate_file(path):
               text = path.read_text()
@@ -103,39 +127,41 @@ workflows:
               replacements = []
 
               while True:
-                  match = block_pattern.search(text, pos)
-                  if not match:
+                  name_pos = text.find('kotlinOptions', pos)
+                  if name_pos == -1:
                       break
 
-                  open_pos = text.find('{', match.start(), match.end())
+                  open_pos = text.find('{', name_pos + len('kotlinOptions'))
+                  if open_pos == -1:
+                      failures.append(f'{path}: kotlinOptions has no opening brace')
+                      break
+
                   close_pos = find_matching_brace(text, open_pos)
                   body = text[open_pos + 1:close_pos]
-
-                  body_clean = re.sub(r"(?m)//.*$", "", body)
-                  body_clean = re.sub(r"/\\*.*?\\*/", "", body_clean, flags=re.S).strip()
+                  clean = normalize(strip_comments(body))
 
                   jvm_value = None
-                  if jvm_set_pattern.search(body):
-                      jvm_value = 'JVM_17' if re.search(r'jvmTarget\\s*=\\s*[\"\']17[\"\']', body) else 'JVM_1_8'
-                  elif jvm_set_call_pattern.search(body):
-                      jvm_value = 'JVM_17' if re.search(r'jvmTarget\\s*\\.\\s*set\\s*\\(\\s*[\"\']17[\"\']', body) else 'JVM_1_8'
-
-                  # This project only needs the jvmTarget migration. Preserve safety:
-                  # refuse to rewrite a block that contains unrelated kotlinOptions keys.
-                  normalized = re.sub(r"(?m)^[ \\t]*jvmTarget\\s*=.*$", "", body_clean)
-                  normalized = re.sub(r"(?m)^[ \\t]*jvmTarget\\s*\\.\\s*set\\s*\\(.*\\)\\s*$", "", normalized)
-                  normalized = normalized.strip()
-
-                  if jvm_value is None:
-                      failures.append(f'{path}: kotlinOptions has no supported jvmTarget value')
-                  elif normalized:
-                      failures.append(f'{path}: kotlinOptions contains unsupported settings: {normalized[:160]}')
+                  accepted = {
+                      'jvmTarget="17"': 'JVM_17',
+                      "jvmTarget='17'": 'JVM_17',
+                      'jvmTarget.set("17")': 'JVM_17',
+                      "jvmTarget.set('17')": 'JVM_17',
+                      'jvmTarget="1.8"': 'JVM_1_8',
+                      "jvmTarget='1.8'": 'JVM_1_8',
+                      'jvmTarget.set("1.8")': 'JVM_1_8',
+                      "jvmTarget.set('1.8')": 'JVM_1_8',
+                  }
+                  if clean in accepted:
+                      jvm_value = accepted[clean]
+                  elif clean.startswith('jvmTarget=JvmTarget.'):
+                      failures.append(f'{path}: kotlinOptions already uses typed JvmTarget; review source')
+                  elif clean:
+                      failures.append(f'{path}: unsupported kotlinOptions content: {clean[:200]}')
                   else:
-                      indent_match = re.search(r'(?m)^([ \\t]*)\\bkotlinOptions\\s*\\{', text[:match.start() + 1])
-                      indent = indent_match.group(1) if indent_match else ''
-                      replacement = 'compilerOptions { jvmTarget = JvmTarget.' + jvm_value + ' }'
-                      replacements.append((match.start(), close_pos + 1, replacement))
+                      failures.append(f'{path}: empty kotlinOptions block')
 
+                  if jvm_value:
+                      replacements.append((name_pos, close_pos + 1, 'compilerOptions { jvmTarget = JvmTarget.' + jvm_value + ' }'))
                   pos = close_pos + 1
 
               for start, end, replacement in reversed(replacements):
@@ -150,16 +176,16 @@ workflows:
           for path in Path('.').rglob('build.gradle.kts'):
               migrate_file(path)
 
+          remaining = []
+          for path in Path('.').rglob('build.gradle.kts'):
+              if 'kotlinOptions' in path.read_text():
+                  remaining.append(str(path))
+
           if failures:
               print('Kotlin compiler option migration errors:')
               for item in failures:
                   print(f'  {item}')
               raise SystemExit(1)
-
-          remaining = []
-          for path in Path('.').rglob('build.gradle.kts'):
-              if re.search(r'\\bkotlinOptions\\s*\\{', path.read_text()):
-                  remaining.append(str(path))
 
           if remaining:
               print('Deprecated kotlinOptions remains in:')
