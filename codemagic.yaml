@@ -3,10 +3,8 @@ workflows:
     name: OurIDE Debug APK
     max_build_duration: 120
     instance_type: mac_mini_m2
-
     environment:
       java: 17
-
     scripts:
       - name: Restore OurIDE source archive
         script: |
@@ -33,9 +31,10 @@ workflows:
       - name: Configure Android SDK
         script: |
           set -euo pipefail
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+          cd "$CM_BUILD_DIR"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-      - name: Modernize Kotlin compiler options
+      - name: Modernize legacy Kotlin DSL
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
@@ -44,9 +43,7 @@ workflows:
           import re
 
           changed = []
-          kotlin_files = []
-
-          def migrate(path):
+          for path in Path('.').rglob('build.gradle.kts'):
               text = path.read_text()
               original = text
               text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
@@ -61,41 +58,36 @@ workflows:
               if text != original:
                   path.write_text(text)
                   changed.append(str(path))
-              if 'org.gradle.kotlin.kotlin-dsl' in original or 'kotlin-dsl' in original:
-                  kotlin_files.append(path)
-
-          for path in Path('.').rglob('build.gradle.kts'):
-              migrate(path)
 
           remaining = []
           for path in Path('.').rglob('build.gradle.kts'):
               if re.search(r'\bkotlinOptions\b', path.read_text()):
                   remaining.append(str(path))
-
           if remaining:
-              print('Deprecated kotlinOptions remains in:')
-              for path in remaining:
-                  print(f'  {path}')
+              print('kotlinOptions remains:')
+              print('\n'.join(remaining))
               raise SystemExit(1)
-
-          # Gradle 8.14.1 embeds Kotlin 2.0.21. The project requests Kotlin 2.3.x,
-          # so kotlin-dsl convention builds must explicitly use language/api 2.1+.
-          config_block = '''\n\ntasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {\n    compilerOptions {\n        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)\n        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)\n    }\n}\n'''
-          for path in kotlin_files:
-              text = path.read_text()
-              marker = 'languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)'
-              if marker not in text:
-                  path.write_text(text.rstrip() + config_block)
-                  if str(path) not in changed:
-                      changed.append(str(path))
-
-          if not changed:
-              raise SystemExit('No Gradle modernization changes were applied')
-
-          print('Modernized Gradle/Kotlin configuration in:')
-          for path in changed:
-              print(f'  {path}')
+          print('Migrated files:', len(changed))
           PY
+
+      - name: Configure Kotlin compatibility
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          cat > codemagic-kotlin-compat.gradle.kts <<'EOF'
+          import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+          import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+          allprojects {
+              tasks.withType<KotlinCompile>().configureEach {
+                  compilerOptions {
+                      jvmTarget.set(JvmTarget.JVM_17)
+                      languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+                      apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+                  }
+              }
+          }
+          EOF
 
       - name: Prepare Codemagic-compatible Gradle build
         script: |
@@ -103,7 +95,7 @@ workflows:
           cd "$CM_BUILD_DIR"
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("gradle/libs.versions.toml")
+          p = Path('gradle/libs.versions.toml')
           text = p.read_text()
           text = text.replace('agp = "9.4.0"', 'agp = "8.13.2"')
           text = text.replace('agp-tooling = "9.4.0"', 'agp-tooling = "8.13.2"')
@@ -127,7 +119,7 @@ workflows:
           GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
           test -x "$GRADLE_BIN"
           "$GRADLE_BIN" --version
-          "$GRADLE_BIN" :core:app:assembleDebug --stacktrace --no-daemon
+          "$GRADLE_BIN" --init-script "$CM_BUILD_DIR/codemagic-kotlin-compat.gradle.kts" :core:app:assembleDebug --stacktrace --no-daemon
 
     artifacts:
       - "core/app/build/outputs/apk/debug/*.apk"
