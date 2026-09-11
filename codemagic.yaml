@@ -55,9 +55,48 @@ workflows:
               text = re.sub(r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())', text)
               text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)', r'freeCompilerArgs.addAll(listOf(\1))', text)
               text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)', r'freeCompilerArgs.add(\1)', text)
+
+              # Kotlin 2.3 warns/fails when kotlin-dsl is combined with an explicit
+              # kotlin-jvm plugin. Convention/precompiled build logic should let
+              # kotlin-dsl provide Gradle's embedded Kotlin version instead.
+              if '`kotlin-dsl`' in text or 'kotlin("dsl")' in text or 'org.gradle.kotlin.kotlin-dsl' in text:
+                  lines = text.splitlines(True)
+                  kept = []
+                  removed = 0
+                  for line in lines:
+                      stripped = line.strip()
+                      is_kotlin_jvm = (
+                          'kotlin("jvm")' in stripped
+                          or 'id("org.jetbrains.kotlin.jvm")' in stripped
+                          or "id('org.jetbrains.kotlin.jvm')" in stripped
+                          or 'org.jetbrains.kotlin.jvm' in stripped and ('alias(' in stripped or 'apply(' in stripped)
+                      )
+                      if is_kotlin_jvm:
+                          removed += 1
+                          continue
+                      kept.append(line)
+                  text = ''.join(kept)
+                  if removed:
+                      changed.append(f'{path} (removed explicit kotlin-jvm)')
+
               if text != original:
                   path.write_text(text)
-                  changed.append(str(path))
+                  if str(path) not in changed:
+                      changed.append(str(path))
+
+          # Also patch any explicit Kotlin JVM plugin version in build-logic/composite
+          # build files to the Gradle-embedded Kotlin version used by kotlin-dsl.
+          for path in list(Path('build-logic').rglob('build.gradle.kts')) + list(Path('composite-builds').rglob('build.gradle.kts')):
+              text = path.read_text()
+              original = text
+              if '`kotlin-dsl`' in text or 'kotlin("dsl")' in text:
+                  text = re.sub(r'org\.jetbrains\.kotlin\.gradle\.plugin\.KotlinPluginWrapper\s*', '', text)
+                  text = text.replace('version.ref = "kotlin"', 'version = embeddedKotlinVersion')
+                  text = re.sub(r'(kotlin\("jvm"\)\s*)version\s+[^\n]+', r'\1', text)
+                  if text != original:
+                      path.write_text(text)
+                      if str(path) not in changed:
+                          changed.append(str(path))
 
           remaining = []
           for path in Path('.').rglob('build.gradle.kts'):
@@ -68,37 +107,9 @@ workflows:
               print('\n'.join(remaining))
               raise SystemExit(1)
           print('Migrated files:', len(changed))
+          for item in changed:
+              print('  ', item)
           PY
-
-      - name: Prepare Kotlin compatibility init script
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR"
-          cat > codemagic-kotlin-compat.gradle <<'EOF'
-          // Applied without importing the Kotlin Gradle Plugin, so the init script
-          // can compile before project plugins are loaded.
-          gradle.allprojects {
-              tasks.configureEach { task ->
-                  if (task.name == 'compileKotlin' || task.name == 'compileTestKotlin') {
-                      try {
-                          def compilerOptions = task.compilerOptions
-                          def taskLoader = task.class.classLoader
-                          def kotlinVersionClass = Class.forName('org.jetbrains.kotlin.gradle.dsl.KotlinVersion', true, taskLoader)
-                          def kotlin19 = kotlinVersionClass.getField('KOTLIN_1_9').get(null)
-                          compilerOptions.languageVersion.set(kotlin19)
-                          compilerOptions.apiVersion.set(kotlin19)
-
-                          def jvmTargetClass = Class.forName('org.jetbrains.kotlin.gradle.dsl.JvmTarget', true, taskLoader)
-                          def jvm17 = jvmTargetClass.getField('JVM_17').get(null)
-                          compilerOptions.jvmTarget.set(jvm17)
-                      } catch (Throwable ignored) {
-                          // Some non-Kotlin tasks may expose similarly named properties.
-                          // Ignore those and let Gradle configure them normally.
-                      }
-                  }
-              }
-          }
-          EOF
 
       - name: Prepare Codemagic-compatible Gradle build
         script: |
@@ -130,7 +141,7 @@ workflows:
           GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
           test -x "$GRADLE_BIN"
           "$GRADLE_BIN" --version
-          "$GRADLE_BIN" --init-script "$CM_BUILD_DIR/codemagic-kotlin-compat.gradle" :core:app:assembleDebug --stacktrace --no-daemon
+          "$GRADLE_BIN" :core:app:assembleDebug --stacktrace --no-daemon
 
     artifacts:
       - "core/app/build/outputs/apk/debug/*.apk"
