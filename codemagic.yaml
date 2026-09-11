@@ -18,7 +18,6 @@ workflows:
           rm -rf restored_ouride
           mkdir restored_ouride
           unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip -d restored_ouride
-
           PROJECT_ROOT=""
           while IFS= read -r settings_file; do
             candidate="$(dirname "$settings_file")"
@@ -27,7 +26,6 @@ workflows:
               break
             fi
           done < <(find restored_ouride -type f -name settings.gradle.kts -print)
-
           test -n "$PROJECT_ROOT"
           cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
           rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
@@ -43,149 +41,40 @@ workflows:
           cd "$CM_BUILD_DIR"
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           changed = []
-          failures = []
 
-          def find_matching_brace(text, open_pos):
-              depth = 0
-              quote = None
-              triple = False
-              escape = False
-              i = open_pos
-              while i < len(text):
-                  if triple:
-                      if text.startswith('"""', i):
-                          triple = False
-                          i += 3
-                      else:
-                          i += 1
-                      continue
-
-                  c = text[i]
-                  if quote is not None:
-                      if escape:
-                          escape = False
-                      elif c == '\\':
-                          escape = True
-                      elif c == quote:
-                          quote = None
-                      i += 1
-                      continue
-
-                  if text.startswith('"""', i):
-                      triple = True
-                      i += 3
-                      continue
-                  if c in ('"', "'"):
-                      quote = c
-                  elif c == '{':
-                      depth += 1
-                  elif c == '}':
-                      depth -= 1
-                      if depth == 0:
-                          return i
-                  i += 1
-              raise ValueError('Unclosed Kotlin block')
-
-          def strip_comments(text):
-              lines = []
-              in_block = False
-              for line in text.splitlines():
-                  out = ''
-                  i = 0
-                  while i < len(line):
-                      if in_block:
-                          end = line.find('*/', i)
-                          if end == -1:
-                              i = len(line)
-                          else:
-                              in_block = False
-                              i = end + 2
-                      else:
-                          block = line.find('/*', i)
-                          slash = line.find('//', i)
-                          if slash != -1 and (block == -1 or slash < block):
-                              out += line[i:slash]
-                              break
-                          if block == -1:
-                              out += line[i:]
-                              break
-                          out += line[i:block]
-                          in_block = True
-                          i = block + 2
-                  lines.append(out)
-              return '\n'.join(lines)
-
-          def normalize(value):
-              return ''.join(value.split())
-
-          def migrate_file(path):
+          def migrate(path):
               text = path.read_text()
               original = text
-              pos = 0
-              replacements = []
 
-              while True:
-                  name_pos = text.find('kotlinOptions', pos)
-                  if name_pos == -1:
-                      break
+              # Migrate the old Kotlin DSL receiver without trying to parse nested Gradle braces.
+              text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
+              text = re.sub(r'\bkotlinOptions(?=\s*\.)', 'compilerOptions', text)
 
-                  open_pos = text.find('{', name_pos + len('kotlinOptions'))
-                  if open_pos == -1:
-                      failures.append(f'{path}: kotlinOptions has no opening brace')
-                      break
+              # Kotlin compilerOptions uses typed JvmTarget values.
+              text = re.sub(r'\bjvmTarget\s*=\s*["\']17["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', text)
+              text = re.sub(r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)', text)
+              text = re.sub(r'\bjvmTarget\s*=\s*["\']1\.8["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8', text)
+              text = re.sub(r'\bjvmTarget\.set\(\s*["\']1\.8["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)', text)
+              text = re.sub(r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())', text)
 
-                  close_pos = find_matching_brace(text, open_pos)
-                  body = text[open_pos + 1:close_pos]
-                  clean = normalize(strip_comments(body))
-
-                  jvm_value = None
-                  accepted = {
-                      'jvmTarget="17"': 'JVM_17',
-                      "jvmTarget='17'": 'JVM_17',
-                      'jvmTarget.set("17")': 'JVM_17',
-                      "jvmTarget.set('17')": 'JVM_17',
-                      'jvmTarget="1.8"': 'JVM_1_8',
-                      "jvmTarget='1.8'": 'JVM_1_8',
-                      'jvmTarget.set("1.8")': 'JVM_1_8',
-                      "jvmTarget.set('1.8')": 'JVM_1_8',
-                  }
-                  if clean in accepted:
-                      jvm_value = accepted[clean]
-                  elif clean.startswith('jvmTarget=JvmTarget.'):
-                      failures.append(f'{path}: kotlinOptions already uses typed JvmTarget; review source')
-                  elif clean:
-                      failures.append(f'{path}: unsupported kotlinOptions content: {clean[:200]}')
-                  else:
-                      failures.append(f'{path}: empty kotlinOptions block')
-
-                  if jvm_value:
-                      replacements.append((name_pos, close_pos + 1, 'compilerOptions { jvmTarget = JvmTarget.' + jvm_value + ' }'))
-                  pos = close_pos + 1
-
-              for start, end, replacement in reversed(replacements):
-                  text = text[:start] + replacement + text[end:]
+              # Migrate common freeCompilerArgs += forms used by the project.
+              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)', r'freeCompilerArgs.addAll(listOf(\1))', text)
+              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)', r'freeCompilerArgs.add(\1)', text)
 
               if text != original:
-                  if 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget' not in text:
-                      text = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + text
                   path.write_text(text)
                   changed.append(str(path))
 
           for path in Path('.').rglob('build.gradle.kts'):
-              migrate_file(path)
+              migrate(path)
 
           remaining = []
           for path in Path('.').rglob('build.gradle.kts'):
-              if 'kotlinOptions' in path.read_text():
+              if re.search(r'\bkotlinOptions\b', path.read_text()):
                   remaining.append(str(path))
-
-          if failures:
-              print('Kotlin compiler option migration errors:')
-              for item in failures:
-                  print(f'  {item}')
-              raise SystemExit(1)
 
           if remaining:
               print('Deprecated kotlinOptions remains in:')
@@ -205,10 +94,8 @@ workflows:
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("gradle/libs.versions.toml")
           text = p.read_text()
           text = text.replace('agp = "9.4.0"', 'agp = "8.13.2"')
