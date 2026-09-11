@@ -44,29 +44,25 @@ workflows:
           import re
 
           changed = []
+          kotlin_files = []
 
           def migrate(path):
               text = path.read_text()
               original = text
-
-              # Migrate the old Kotlin DSL receiver without trying to parse nested Gradle braces.
               text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
               text = re.sub(r'\bkotlinOptions(?=\s*\.)', 'compilerOptions', text)
-
-              # Kotlin compilerOptions uses typed JvmTarget values.
               text = re.sub(r'\bjvmTarget\s*=\s*["\']17["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', text)
               text = re.sub(r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)', text)
               text = re.sub(r'\bjvmTarget\s*=\s*["\']1\.8["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8', text)
               text = re.sub(r'\bjvmTarget\.set\(\s*["\']1\.8["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)', text)
               text = re.sub(r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())', text)
-
-              # Migrate common freeCompilerArgs += forms used by the project.
               text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)', r'freeCompilerArgs.addAll(listOf(\1))', text)
               text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)', r'freeCompilerArgs.add(\1)', text)
-
               if text != original:
                   path.write_text(text)
                   changed.append(str(path))
+              if 'org.gradle.kotlin.kotlin-dsl' in original or 'kotlin-dsl' in original:
+                  kotlin_files.append(path)
 
           for path in Path('.').rglob('build.gradle.kts'):
               migrate(path)
@@ -82,10 +78,21 @@ workflows:
                   print(f'  {path}')
               raise SystemExit(1)
 
-          if not changed:
-              raise SystemExit('No Kotlin compiler option migration was applied')
+          # Gradle 8.14.1 embeds Kotlin 2.0.21. The project requests Kotlin 2.3.x,
+          # so kotlin-dsl convention builds must explicitly use language/api 2.1+.
+          config_block = '''\n\ntasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {\n    compilerOptions {\n        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)\n        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)\n    }\n}\n'''
+          for path in kotlin_files:
+              text = path.read_text()
+              marker = 'languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)'
+              if marker not in text:
+                  path.write_text(text.rstrip() + config_block)
+                  if str(path) not in changed:
+                      changed.append(str(path))
 
-          print('Modernized Kotlin compiler options in:')
+          if not changed:
+              raise SystemExit('No Gradle modernization changes were applied')
+
+          print('Modernized Gradle/Kotlin configuration in:')
           for path in changed:
               print(f'  {path}')
           PY
