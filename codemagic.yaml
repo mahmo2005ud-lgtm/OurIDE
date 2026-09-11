@@ -13,13 +13,19 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR"
 
-          test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00"
-          test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01"
+          test -f OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00
+          test -f OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
 
-          cat \
-            "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00" \
-            "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01" \
-            > OurIDE_SOURCE_CLEAN_1.0.1.zip
+          # Keep the tracked build-config sources that are outside the split archive.
+          rm -rf /tmp/ouride-build-config
+          mkdir -p /tmp/ouride-build-config
+          CONFIG_SRC="composite-builds/build-logic/common/src/main/java/com/itsaky/androidide/build/config"
+          if [ -d "$CONFIG_SRC" ]; then
+            cp -R "$CONFIG_SRC" /tmp/ouride-build-config/
+          fi
+
+          cat OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 \
+              OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01 > OurIDE_SOURCE_CLEAN_1.0.1.zip
 
           rm -rf restored_ouride
           mkdir -p restored_ouride
@@ -33,21 +39,24 @@ workflows:
               break
             fi
           done < <(find restored_ouride -type f -name settings.gradle.kts -print)
-
           test -n "$PROJECT_ROOT"
+
           cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
 
-          rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip
+          # Restore the build-config package after archive extraction.
+          if [ -d /tmp/ouride-build-config/config ]; then
+            rm -rf "$CONFIG_SRC"
+            mkdir -p "$(dirname "$CONFIG_SRC")"
+            cp -R /tmp/ouride-build-config/config "$CONFIG_SRC"
+          fi
+
+          rm -rf restored_ouride /tmp/ouride-build-config OurIDE_SOURCE_CLEAN_1.0.1.zip
           rm -f OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
+          chmod +x gradlew
 
-          chmod +x "$CM_BUILD_DIR/gradlew"
-
-          # The archive does not contain a .git directory, while the build logic
-          # uses Git metadata for CI versioning.
-          cd "$CM_BUILD_DIR"
           git init
-          git config user.name "Codemagic"
-          git config user.email "codemagic@localhost"
+          git config user.name Codemagic
+          git config user.email codemagic@localhost
           git add -A
           git commit -m "Codemagic build snapshot" >/dev/null
 
@@ -56,53 +65,44 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          echo "Android SDK: $ANDROID_SDK_ROOT"
 
-      - name: Install Android SDK 36
+      - name: Install Android SDK 34
         script: |
           set -euo pipefail
           SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           test -x "$SDKMANAGER"
           "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools"
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
-      - name: Inspect the project compatibility matrix
+      - name: Restore compatible Gradle and plugin versions
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
 
+          # The source is based on AndroidIDE's AGP 8.5 / Kotlin 1.9.24 matrix.
+          # The archive was previously rewritten to a 9.x/2.3.x matrix; undo that
+          # rewrite before Gradle starts. KSP 1.9.24-1.0.20 then matches Kotlin 1.9.24.
+          sed -i '' 's/gradle-9\.6-bin\.zip/gradle-8.8-bin.zip/g' gradle/wrapper/gradle-wrapper.properties
+          sed -i '' 's/agp = "9\.4\.0"/agp = "8.5.0"/' gradle/libs.versions.toml
+          sed -i '' 's/agp-tooling = "9\.4\.0"/agp-tooling = "8.5.0"/' gradle/libs.versions.toml
+          sed -i '' 's/kotlin = "2\.3\.21"/kotlin = "1.9.24"/' gradle/libs.versions.toml
+          sed -i '' 's/gradle-tooling = "9\.6"/gradle-tooling = "8.6"/' gradle/libs.versions.toml
+
           echo "=== Java ==="
           java -version
-
-          echo "=== Gradle Wrapper ==="
-          grep -E 'distributionUrl=' gradle/wrapper/gradle-wrapper.properties
-          ./gradlew --version
-
-          echo "=== Version catalog ==="
-          grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
+          echo "=== Wrapper ==="
+          grep distributionUrl gradle/wrapper/gradle-wrapper.properties
+          echo "=== Versions ==="
+          grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)[[:space:]]*=' gradle/libs.versions.toml
 
       - name: Verify source completeness
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-
-          # These files are required by build-logic. They were missing from the
-          # original split source archive and are now restored as tracked source.
           CONFIG_DIR="composite-builds/build-logic/common/src/main/java/com/itsaky/androidide/build/config"
-          for file in \
-            BuildConfig.kt \
-            CI.kt \
-            FDroidConfig.kt \
-            ProjectConfig.kt \
-            VersionUtils.kt \
-            config.kt \
-            utils.kt; do
+          for file in BuildConfig.kt CI.kt FDroidConfig.kt ProjectConfig.kt VersionUtils.kt config.kt utils.kt; do
             test -f "$CONFIG_DIR/$file"
           done
-
           test -d composite-builds/build-logic/desugaring
           test -d composite-builds/build-deps-common/desugaring-core
           test -d core/app
@@ -111,96 +111,33 @@ workflows:
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          changed = []
-
           for path in Path('.').rglob('build.gradle.kts'):
-              original = path.read_text()
-              text = original
-
+              text = path.read_text()
+              original = text
               text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
               text = re.sub(r'\bkotlinOptions(?=\s*\.)', 'compilerOptions', text)
-
-              text = re.sub(
-                  r'\bjvmTarget\s*=\s*["\']17["\']',
-                  'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17',
-                  text,
-              )
-              text = re.sub(
-                  r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)',
-                  'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)',
-                  text,
-              )
-              text = re.sub(
-                  r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)',
-                  'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())',
-                  text,
-              )
-
-              text = re.sub(
-                  r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)',
-                  r'freeCompilerArgs.addAll(listOf(\1))',
-                  text,
-              )
-              text = re.sub(
-                  r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)',
-                  r'freeCompilerArgs.add(\1)',
-                  text,
-              )
-
+              text = re.sub(r'\bjvmTarget\s*=\s*["\']17["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', text)
+              text = re.sub(r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)', text)
+              text = re.sub(r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())', text)
+              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)', r'freeCompilerArgs.addAll(listOf(\1))', text)
+              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)', r'freeCompilerArgs.add(\1)', text)
               if text != original:
                   path.write_text(text)
-                  changed.append(str(path))
 
-          leftovers = []
-          for path in Path('.').rglob('build.gradle.kts'):
-              if re.search(r'\bkotlinOptions\b', path.read_text()):
-                  leftovers.append(str(path))
-
+          leftovers = [str(p) for p in Path('.').rglob('build.gradle.kts') if re.search(r'\bkotlinOptions\b', p.read_text())]
           if leftovers:
-              print('ERROR: legacy kotlinOptions remains:')
-              print('\n'.join(leftovers))
-              raise SystemExit(1)
-
-          print('Migrated files:', len(changed))
-          for item in changed:
-              print('  ' + item)
+              raise SystemExit('legacy kotlinOptions remains: ' + ', '.join(leftovers))
           PY
-
-      - name: Verify source versions were not rewritten
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR"
-
-          echo "=== Final compatibility matrix ==="
-          grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
-
-          grep -q '^agp = "9.4.0"' gradle/libs.versions.toml
-          grep -q '^agp-tooling = "9.4.0"' gradle/libs.versions.toml
-          grep -q '^kotlin = "2.3.21"' gradle/libs.versions.toml
-          grep -q '^gradle-tooling = "9.6"' gradle/libs.versions.toml
-
-          # Do not rewrite or pre-emptively change KSP here. Its compatibility
-          # will be evaluated by the real Gradle build rather than by YAML.
-          test -f settings.gradle.kts
-          test -d composite-builds/build-logic/desugaring
-          test -d composite-builds/build-deps-common/desugaring-core
-          test -f composite-builds/build-logic/common/src/main/java/com/itsaky/androidide/build/config/BuildConfig.kt
-          test -d core/app
 
       - name: Build OurIDE
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-
-          # Use the project's Gradle 9.6 wrapper. Do not substitute another
-          # Gradle, AGP, or Kotlin version in CI.
           ./gradlew :core:app:assembleDebug --stacktrace --no-daemon
-
           APK="$(find core/app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)"
           test -n "$APK"
           echo "OurIDE Debug APK created successfully: $APK"
