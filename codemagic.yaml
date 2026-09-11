@@ -70,20 +70,31 @@ workflows:
           print('Migrated files:', len(changed))
           PY
 
-      - name: Configure Kotlin compatibility
+      - name: Prepare Kotlin compatibility init script
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          cat > codemagic-kotlin-compat.gradle.kts <<'EOF'
-          import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-          import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+          cat > codemagic-kotlin-compat.gradle <<'EOF'
+          // Applied without importing the Kotlin Gradle Plugin, so the init script
+          // can compile before project plugins are loaded.
+          gradle.allprojects {
+              tasks.configureEach { task ->
+                  if (task.name == 'compileKotlin' || task.name == 'compileTestKotlin') {
+                      try {
+                          def compilerOptions = task.compilerOptions
+                          def taskLoader = task.class.classLoader
+                          def kotlinVersionClass = Class.forName('org.jetbrains.kotlin.gradle.dsl.KotlinVersion', true, taskLoader)
+                          def kotlin19 = kotlinVersionClass.getField('KOTLIN_1_9').get(null)
+                          compilerOptions.languageVersion.set(kotlin19)
+                          compilerOptions.apiVersion.set(kotlin19)
 
-          allprojects {
-              tasks.withType<KotlinCompile>().configureEach {
-                  compilerOptions {
-                      jvmTarget.set(JvmTarget.JVM_17)
-                      languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
-                      apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+                          def jvmTargetClass = Class.forName('org.jetbrains.kotlin.gradle.dsl.JvmTarget', true, taskLoader)
+                          def jvm17 = jvmTargetClass.getField('JVM_17').get(null)
+                          compilerOptions.jvmTarget.set(jvm17)
+                      } catch (Throwable ignored) {
+                          // Some non-Kotlin tasks may expose similarly named properties.
+                          // Ignore those and let Gradle configure them normally.
+                      }
                   }
               }
           }
@@ -119,7 +130,7 @@ workflows:
           GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
           test -x "$GRADLE_BIN"
           "$GRADLE_BIN" --version
-          "$GRADLE_BIN" --init-script "$CM_BUILD_DIR/codemagic-kotlin-compat.gradle.kts" :core:app:assembleDebug --stacktrace --no-daemon
+          "$GRADLE_BIN" --init-script "$CM_BUILD_DIR/codemagic-kotlin-compat.gradle" :core:app:assembleDebug --stacktrace --no-daemon
 
     artifacts:
       - "core/app/build/outputs/apk/debug/*.apk"
