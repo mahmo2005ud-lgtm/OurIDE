@@ -42,8 +42,8 @@ workflows:
 
           chmod +x "$CM_BUILD_DIR/gradlew"
 
-          # The source archive intentionally has no .git directory.
-          # Our settings use Git detection for the Nyx versioning plugin.
+          # The archive does not contain a .git directory, while the build logic
+          # uses Git metadata for CI versioning.
           cd "$CM_BUILD_DIR"
           git init
           git config user.name "Codemagic"
@@ -84,6 +84,29 @@ workflows:
           echo "=== Version catalog ==="
           grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
 
+      - name: Verify source completeness
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+
+          # These files are required by build-logic. They were missing from the
+          # original split source archive and are now restored as tracked source.
+          CONFIG_DIR="composite-builds/build-logic/common/src/main/java/com/itsaky/androidide/build/config"
+          for file in \
+            BuildConfig.kt \
+            CI.kt \
+            FDroidConfig.kt \
+            ProjectConfig.kt \
+            VersionUtils.kt \
+            config.kt \
+            utils.kt; do
+            test -f "$CONFIG_DIR/$file"
+          done
+
+          test -d composite-builds/build-logic/desugaring
+          test -d composite-builds/build-deps-common/desugaring-core
+          test -d core/app
+
       - name: Migrate legacy Kotlin compiler options
         script: |
           set -euo pipefail
@@ -99,11 +122,9 @@ workflows:
               original = path.read_text()
               text = original
 
-              # Kotlin 2.3.x no longer accepts the old kotlinOptions DSL.
               text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
               text = re.sub(r'\bkotlinOptions(?=\s*\.)', 'compilerOptions', text)
 
-              # Convert the old String JVM target to the typed compilerOptions API.
               text = re.sub(
                   r'\bjvmTarget\s*=\s*["\']17["\']',
                   'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17',
@@ -120,7 +141,6 @@ workflows:
                   text,
               )
 
-              # Convert legacy collection mutation to the compilerOptions API.
               text = re.sub(
                   r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)',
                   r'freeCompilerArgs.addAll(listOf(\1))',
@@ -159,15 +179,17 @@ workflows:
           echo "=== Final compatibility matrix ==="
           grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
 
-          # These are the versions the source was authored with.
           grep -q '^agp = "9.4.0"' gradle/libs.versions.toml
           grep -q '^agp-tooling = "9.4.0"' gradle/libs.versions.toml
           grep -q '^kotlin = "2.3.21"' gradle/libs.versions.toml
-          grep -q '^ksp = "1.9.24-1.0.20"' gradle/libs.versions.toml
+          grep -q '^gradle-tooling = "9.6"' gradle/libs.versions.toml
 
+          # Do not rewrite or pre-emptively change KSP here. Its compatibility
+          # will be evaluated by the real Gradle build rather than by YAML.
           test -f settings.gradle.kts
           test -d composite-builds/build-logic/desugaring
           test -d composite-builds/build-deps-common/desugaring-core
+          test -f composite-builds/build-logic/common/src/main/java/com/itsaky/androidide/build/config/BuildConfig.kt
           test -d core/app
 
       - name: Build OurIDE
@@ -175,9 +197,8 @@ workflows:
           set -euo pipefail
           cd "$CM_BUILD_DIR"
 
-          # The repository wrapper is Gradle 9.6, which embeds Kotlin 2.3.21.
-          # This matches the project's Kotlin 2.3.21 build logic instead of
-          # forcing an unrelated Gradle/Kotlin version during CI.
+          # Use the project's Gradle 9.6 wrapper. Do not substitute another
+          # Gradle, AGP, or Kotlin version in CI.
           ./gradlew :core:app:assembleDebug --stacktrace --no-daemon
 
           APK="$(find core/app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)"
