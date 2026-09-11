@@ -3,19 +3,28 @@ workflows:
     name: OurIDE Debug APK
     max_build_duration: 120
     instance_type: mac_mini_m2
+
     environment:
       java: 17
+
     scripts:
       - name: Restore OurIDE source archive
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
+
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00"
           test -f "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01"
-          cat "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00" "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01" > OurIDE_SOURCE_CLEAN_1.0.1.zip
+
+          cat \
+            "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00" \
+            "OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01" \
+            > OurIDE_SOURCE_CLEAN_1.0.1.zip
+
           rm -rf restored_ouride
-          mkdir restored_ouride
+          mkdir -p restored_ouride
           unzip -q OurIDE_SOURCE_CLEAN_1.0.1.zip -d restored_ouride
+
           PROJECT_ROOT=""
           while IFS= read -r settings_file; do
             candidate="$(dirname "$settings_file")"
@@ -24,9 +33,23 @@ workflows:
               break
             fi
           done < <(find restored_ouride -type f -name settings.gradle.kts -print)
+
           test -n "$PROJECT_ROOT"
           cp -R "$PROJECT_ROOT"/. "$CM_BUILD_DIR"/
-          rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
+
+          rm -rf restored_ouride OurIDE_SOURCE_CLEAN_1.0.1.zip
+          rm -f OurIDE_SOURCE_CLEAN_1.0.1.zip.part-00 OurIDE_SOURCE_CLEAN_1.0.1.zip.part-01
+
+          chmod +x "$CM_BUILD_DIR/gradlew"
+
+          # The source archive intentionally has no .git directory.
+          # Our settings use Git detection for the Nyx versioning plugin.
+          cd "$CM_BUILD_DIR"
+          git init
+          git config user.name "Codemagic"
+          git config user.email "codemagic@localhost"
+          git add -A
+          git commit -m "Codemagic build snapshot" >/dev/null
 
       - name: Configure Android SDK
         script: |
@@ -35,166 +58,131 @@ workflows:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           echo "Android SDK: $ANDROID_SDK_ROOT"
 
-      - name: Inspect Codemagic build environment
+      - name: Install Android SDK 36
+        script: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Inspect the project compatibility matrix
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
+
           echo "=== Java ==="
           java -version
-          echo "=== Available Gradle ==="
-          ls -1 "$HOME/programs" 2>/dev/null | grep -E '^gradle-' || true
-          echo "=== Gradle wrapper properties ==="
-          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-            grep -E 'distributionUrl=' gradle/wrapper/gradle-wrapper.properties || true
-          fi
-          echo "=== Android SDK ==="
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --version || true
 
-      - name: Modernize Kotlin and align kotlin-dsl with embedded Kotlin
+          echo "=== Gradle Wrapper ==="
+          grep -E 'distributionUrl=' gradle/wrapper/gradle-wrapper.properties
+          ./gradlew --version
+
+          echo "=== Version catalog ==="
+          grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
+
+      - name: Migrate legacy Kotlin compiler options
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           changed = []
 
-          def write_if_changed(path, text, label=None):
-              original = path.read_text()
-              if text != original:
-                  path.write_text(text)
-                  changed.append(label or str(path))
-
-          # 1) Migrate deprecated Kotlin compiler configuration.
           for path in Path('.').rglob('build.gradle.kts'):
-              text = path.read_text()
-              original = text
+              original = path.read_text()
+              text = original
+
+              # Kotlin 2.3.x no longer accepts the old kotlinOptions DSL.
               text = re.sub(r'\bkotlinOptions\s*\{', 'compilerOptions {', text)
               text = re.sub(r'\bkotlinOptions(?=\s*\.)', 'compilerOptions', text)
-              text = re.sub(r'\bjvmTarget\s*=\s*["\']17["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17', text)
-              text = re.sub(r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)', text)
-              text = re.sub(r'\bjvmTarget\s*=\s*["\']1\.8["\']', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8', text)
-              text = re.sub(r'\bjvmTarget\.set\(\s*["\']1\.8["\']\s*\)', 'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)', text)
-              text = re.sub(r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)', 'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())', text)
-              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)', r'freeCompilerArgs.addAll(listOf(\1))', text)
-              text = re.sub(r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)', r'freeCompilerArgs.add(\1)', text)
+
+              # Convert the old String JVM target to the typed compilerOptions API.
+              text = re.sub(
+                  r'\bjvmTarget\s*=\s*["\']17["\']',
+                  'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17',
+                  text,
+              )
+              text = re.sub(
+                  r'\bjvmTarget\.set\(\s*["\']17["\']\s*\)',
+                  'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)',
+                  text,
+              )
+              text = re.sub(
+                  r'\bjvmTarget\s*=\s*BuildConfig\.javaVersion\.toString\(\)',
+                  'jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.fromTarget(BuildConfig.javaVersion.toString())',
+                  text,
+              )
+
+              # Convert legacy collection mutation to the compilerOptions API.
+              text = re.sub(
+                  r'\bfreeCompilerArgs\s*\+=\s*listOf\(([^\n]*)\)',
+                  r'freeCompilerArgs.addAll(listOf(\1))',
+                  text,
+              )
+              text = re.sub(
+                  r'\bfreeCompilerArgs\s*\+=\s*([^\n]+)',
+                  r'freeCompilerArgs.add(\1)',
+                  text,
+              )
+
               if text != original:
-                  write_if_changed(path, text)
+                  path.write_text(text)
+                  changed.append(str(path))
 
-          # 2) kotlin-dsl convention/precompiled modules must NOT request a
-          # different Kotlin Gradle plugin. Gradle's kotlin-dsl plugin supplies
-          # the compatible embedded Kotlin version.
-          kotlin_dsl_files = []
-          for path in Path('.').rglob('build.gradle.kts'):
-              text = path.read_text()
-              if re.search(r'kotlin-dsl|kotlin\("dsl"\)|org\.gradle\.kotlin\.kotlin-dsl', text):
-                  kotlin_dsl_files.append(path)
-                  original = text
-                  lines = text.splitlines(True)
-                  kept = []
-                  for line in lines:
-                      stripped = line.strip()
-                      # Explicit Kotlin JVM plugin forms, including aliases.
-                      explicit_jvm = bool(re.search(r'kotlin\s*\(\s*["\']jvm["\']\s*\)', stripped))
-                      explicit_jvm |= 'org.jetbrains.kotlin.jvm' in stripped
-                      explicit_jvm |= bool(re.search(r'alias\s*\([^\n]*plugins[^\n]*(kotlin[^\n]*jvm|jvm[^\n]*kotlin)', stripped, re.I))
-                      explicit_jvm |= bool(re.search(r'id\s*\([^\n]*kotlin[^\n]*jvm', stripped, re.I))
-                      if explicit_jvm:
-                          continue
-                      kept.append(line)
-                  text = ''.join(kept)
-                  # Never inject a replacement Kotlin version into kotlin-dsl.
-                  text = re.sub(r'(?m)^\s*version\s+[^\n]*2\.3\.21[^\n]*\n?', '', text)
-                  write_if_changed(path, text)
-
-          # 3) Remove explicit Kotlin JVM plugin version declarations from
-          # build-logic/composite build plugin blocks when present.
-          for root_name in ('build-logic', 'composite-builds'):
-              root = Path(root_name)
-              if not root.exists():
-                  continue
-              for path in root.rglob('*.gradle.kts'):
-                  text = path.read_text()
-                  if not re.search(r'kotlin-dsl|kotlin\("dsl"\)|org\.gradle\.kotlin\.kotlin-dsl', text):
-                      continue
-                  original = text
-                  text = re.sub(r'(?m)^\s*version\.ref\s*=\s*["\']kotlin["\']\s*$', '', text)
-                  text = re.sub(r'(?m)^\s*version\s*["\']?2\.3\.21["\']?\s*$', '', text)
-                  write_if_changed(path, text)
-
-          # 4) Hard regression checks before Gradle starts.
           leftovers = []
           for path in Path('.').rglob('build.gradle.kts'):
               if re.search(r'\bkotlinOptions\b', path.read_text()):
-                  leftovers.append(f'kotlinOptions: {path}')
+                  leftovers.append(str(path))
+
           if leftovers:
+              print('ERROR: legacy kotlinOptions remains:')
               print('\n'.join(leftovers))
-              raise SystemExit('Deprecated kotlinOptions remains')
-
-          bad_kotlin_dsl = []
-          requested_231 = []
-          for path in kotlin_dsl_files:
-              text = path.read_text()
-              if re.search(r'kotlin\s*\(\s*["\']jvm["\']\s*\)|org\.jetbrains\.kotlin\.jvm', text):
-                  bad_kotlin_dsl.append(str(path))
-              if '2.3.21' in text:
-                  requested_231.append(str(path))
-          if bad_kotlin_dsl:
-              print('Explicit Kotlin JVM plugin remains in kotlin-dsl files:')
-              print('\n'.join(bad_kotlin_dsl))
-              raise SystemExit(1)
-          if requested_231:
-              print('Kotlin 2.3.21 remains in kotlin-dsl files:')
-              print('\n'.join(requested_231))
               raise SystemExit(1)
 
-          print('kotlin-dsl files inspected:', len(kotlin_dsl_files))
-          print('Changed files:', len(changed))
+          print('Migrated files:', len(changed))
           for item in changed:
-              print('  ', item)
+              print('  ' + item)
           PY
 
-      - name: Prepare compatible Android tool versions
+      - name: Verify source versions were not rewritten
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('gradle/libs.versions.toml')
-          text = p.read_text()
-          text = text.replace('agp = "9.4.0"', 'agp = "8.13.2"')
-          text = text.replace('agp-tooling = "9.4.0"', 'agp-tooling = "8.13.2"')
-          text = text.replace('ksp = "1.9.24-1.0.20"', 'ksp = "2.3.12"')
-          p.write_text(text)
-          PY
 
-      - name: Verify project and Gradle compatibility
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR"
-          test -f gradlew
+          echo "=== Final compatibility matrix ==="
+          grep -E '^(agp|agp-tooling|kotlin|ksp|gradle-tooling)\s*=' gradle/libs.versions.toml
+
+          # These are the versions the source was authored with.
+          grep -q '^agp = "9.4.0"' gradle/libs.versions.toml
+          grep -q '^agp-tooling = "9.4.0"' gradle/libs.versions.toml
+          grep -q '^kotlin = "2.3.21"' gradle/libs.versions.toml
+          grep -q '^ksp = "1.9.24-1.0.20"' gradle/libs.versions.toml
+
           test -f settings.gradle.kts
+          test -d composite-builds/build-logic/desugaring
+          test -d composite-builds/build-deps-common/desugaring-core
           test -d core/app
-          chmod +x gradlew
-          echo "=== Project ==="
-          pwd
-          echo "=== Wrapper ==="
-          grep -E 'distributionUrl=' gradle/wrapper/gradle-wrapper.properties || true
-          echo "=== Installed Gradle 8.14.1 ==="
-          GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
-          test -x "$GRADLE_BIN"
-          "$GRADLE_BIN" --version
 
       - name: Build OurIDE
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          GRADLE_BIN="/Users/builder/programs/gradle-8.14.1/bin/gradle"
-          test -x "$GRADLE_BIN"
-          "$GRADLE_BIN" :core:app:assembleDebug --stacktrace --no-daemon
-          test -n "$(find core/app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)"
-          echo "OurIDE Debug APK created successfully."
+
+          # The repository wrapper is Gradle 9.6, which embeds Kotlin 2.3.21.
+          # This matches the project's Kotlin 2.3.21 build logic instead of
+          # forcing an unrelated Gradle/Kotlin version during CI.
+          ./gradlew :core:app:assembleDebug --stacktrace --no-daemon
+
+          APK="$(find core/app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -print -quit)"
+          test -n "$APK"
+          echo "OurIDE Debug APK created successfully: $APK"
 
     artifacts:
       - "core/app/build/outputs/apk/debug/*.apk"
